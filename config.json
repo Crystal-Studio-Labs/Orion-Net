@@ -1,0 +1,8 @@
+{
+  "HUB_URL": "wss://orion-core.onrender.com",
+  "MY_ROOM_NAME": "Orion Room",
+  "PORT": 8765,
+  "ROOM_MOTD": "Welcome to Orion-Net — encrypted, ephemeral chat.",
+  "ROOM_PASSWORD": "",
+  "RENDER_EXTERNAL_URL": ""
+}

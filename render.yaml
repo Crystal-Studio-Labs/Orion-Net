@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: orion-net
+    runtime: python
+    plan: free
+    buildCommand: "pip install websockets cryptography"
+    startCommand: "python orion-net.py"
+    autoDeploy: true
+
+    envVars:
+      - key: HUB_URL
+        value: wss://orion-core.onrender.com
+
+      - key: MY_ROOM_NAME
+        value: Orion Room
+
+      - key: PORT
+        value: 8765
+
+      - key: ROOM_MOTD
+        value: Welcome to Orion-Net!
+
+      - key: ROOM_PASSWORD
+        value: ""
+
+      - key: RENDER_EXTERNAL_URL
+        sync: false   # Render auto-injects this at runtime

@@ -3,7 +3,7 @@ services:
     name: orion-net
     runtime: python
     plan: free
-    buildCommand: "pip install websockets cryptography"
+    buildCommand: "pip install -r requirements.txt"
     startCommand: "python orion-net.py"
     autoDeploy: true
 

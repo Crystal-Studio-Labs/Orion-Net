@@ -1,36 +1,31 @@
 """Orion-Net: room server that registers with Orion-Core hub.
 
-Configuration priority (highest → lowest):
-  1. Environment variables
-  2. config.json in same directory
-  3. Built-in defaults
+Configuration via .env file (or environment variables directly):
 
-config.json example:
-  {
-    "HUB_URL":             "wss://orion-core.onrender.com",
-    "MY_ROOM_NAME":        "My Cool Room",
-    "PORT":                8765,
-    "ROOM_MOTD":           "Welcome, traveller.",
-    "ROOM_PASSWORD":       "secret123",
-    "RENDER_EXTERNAL_URL": ""
-  }
+  HUB_URL             = wss://orion-core.onrender.com
+  MY_ROOM_NAME        = Project Orion
+  PORT                = 8765
+  ROOM_MOTD           = Welcome To Orion Network.
+  ROOM_PASSWORD       = # empty = public room
+  RENDER_EXTERNAL_URL = # set on Render/cloud deployments
+  MSG_HISTORY_SIZE    = 50
 
-Leave ROOM_PASSWORD empty or omit it entirely for a public (open) room.
+Create a .env file in the same directory — all fields are optional.
 
 MESSAGE SCHEMA — every packet is JSON with a "type" field:
-  Outbound to clients:
+  Server → Client:
     {"type":"session_key","key":"<b64>"}
     {"type":"room_meta","locked":bool,"motd":"<str>","room_name":"<str>","history":[...]}
     {"type":"auth_ok"}
     {"type":"auth_fail","message":"<str>"}
-    {"type":"event","event":"join|leave|rename|system|motd","text":"<str>"}
+    {"type":"event","event":"join|leave|rename|system","text":"<str>"}
     {"type":"chat","from":"<name>","ciphertext":"<b64>"}
     {"type":"error","message":"<str>"}
-  Inbound from clients:
+  Client → Server:
     {"type":"handshake","pubkey":"<pem>"}
-    {"type":"auth","ciphertext":"<b64>"}          -- encrypted password
-    {"type":"name","ciphertext":"<b64>"}          -- encrypted display name
-    {"type":"chat","ciphertext":"<b64>"}          -- encrypted message body
+    {"type":"auth","ciphertext":"<b64>"}      -- encrypted password
+    {"type":"name","ciphertext":"<b64>"}      -- encrypted display name
+    {"type":"chat","ciphertext":"<b64>"}      -- encrypted message body
 """
 
 import asyncio
@@ -46,42 +41,29 @@ import string
 import datetime
 from collections import deque
 from pathlib import Path
+from dotenv import load_dotenv
 from websockets import serve, connect
+from websockets.exceptions import ConnectionClosed
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 
 # ─────────────────────────────────────────────
-#  Config loader  (env → config.json → default)
+#  Load .env  (env vars already set take priority)
 # ─────────────────────────────────────────────
 
-def _load_config() -> dict:
-    cfg_path = Path(__file__).parent / "config.json"
-    if cfg_path.exists():
-        try:
-            with open(cfg_path) as f:
-                data = json.load(f)
-            # Only filter explicit None; keep 0 for PORT etc.
-            return {k: v for k, v in data.items() if v is not None and v != ""}
-        except Exception as e:
-            print(f"\033[38;5;196m[config] Failed to parse config.json: {e}\033[0m")
-    return {}
-
-_cfg = _load_config()
+_env_path = Path(__file__).parent / ".env"
+load_dotenv(_env_path, override=False)   # override=False: real env vars win
 
 def _get(key: str, default):
-    env_val = os.environ.get(key)
-    if env_val is not None:
-        return env_val
-    return _cfg.get(key, default)
+    return os.environ.get(key, default)
 
 HUB_URL             = _get("HUB_URL",             "https://orion-core.onrender.com")
 MY_ROOM_NAME        = _get("MY_ROOM_NAME",         "Orion Room")
-RENDER_EXTERNAL_URL = _get("RENDER_EXTERNAL_URL",  None) or None
+RENDER_EXTERNAL_URL = _get("RENDER_EXTERNAL_URL",  "") or ""
 PORT                = int(_get("PORT",             8765))
 ROOM_MOTD           = _get("ROOM_MOTD",            "Welcome to this Orion-Net room!")
 ROOM_PASSWORD       = _get("ROOM_PASSWORD",        "") or ""
-# Max in-memory messages kept per session (ephemeral — lost on restart)
 MSG_HISTORY_SIZE    = int(_get("MSG_HISTORY_SIZE", 50))
 
 # ─────────────────────────────────────────────
@@ -120,9 +102,10 @@ class OrionFormatter(logging.Formatter):
 
 _log_handler = logging.StreamHandler()
 _log_handler.setFormatter(OrionFormatter())
-logging.getLogger().handlers = [_log_handler]
+logging.getLogger().handlers           = [_log_handler]
 logging.getLogger().setLevel(logging.INFO)
 logging.getLogger("websockets").setLevel(logging.WARNING)
+logging.getLogger("websockets.server").setLevel(logging.WARNING)
 log = logging.getLogger("orion-net")
 
 # ─────────────────────────────────────────────
@@ -139,11 +122,10 @@ def _gradient_line(text: str, colors: list) -> str:
     return out + R
 
 def get_banner() -> str:
-    raw = """\
-▛▀▖       ▖      ▐   ▞▀▖   ▗       
-▙▄▘▙▀▖▞▀▖▗▖▞▀▖▞▀▖▜▀  ▌ ▌▙▀▖▄ ▞▀▖▛▀▖
-▌  ▌  ▌ ▌ ▌▛▀ ▌ ▖▐ ▖ ▌ ▌▌  ▐ ▌ ▌▌ ▌
-▘  ▘  ▝▀ ▄▘▝▀▘▝▀  ▀  ▝▀ ▘  ▀▘▝▀ ▘ ▘"""
+    raw = ("▛▀▖       ▖      ▐   ▞▀▖   ▗       \n"
+           "▙▄▘▙▀▖▞▀▖▗▖▞▀▖▞▀▖▜▀  ▌ ▌▙▀▖▄ ▞▀▖▛▀▖\n"
+           "▌  ▌  ▌ ▌ ▌▛▀ ▌ ▖▐ ▖ ▌ ▌▌  ▐ ▌ ▌▌ ▌\n"
+           "▘  ▘  ▝▀ ▄▘▝▀▘▝▀  ▀  ▝▀ ▘  ▀▘▝▀ ▘ ▘")
     grad = ["\033[38;5;17m","\033[38;5;18m","\033[38;5;19m","\033[38;5;20m","\033[38;5;21m",
             "\033[38;5;27m","\033[38;5;33m","\033[38;5;39m","\033[38;5;45m","\033[38;5;51m",
             "\033[38;5;45m","\033[38;5;39m","\033[38;5;33m","\033[38;5;27m","\033[38;5;21m"]
@@ -168,7 +150,7 @@ def print_startup_panel(port: int, room_name: str, hub: str, motd: str,
     W   = 60
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     access_str = f"{YELLOW}🔒 Password protected{R}" if protected else f"{GREEN}🔓 Public (open){R}"
-    cfg_src    = f"{GREEN}config.json{R}" if _cfg else f"{LGREY}env / defaults{R}"
+    env_src    = f"{GREEN}.env file{R}" if _env_path.exists() else f"{LGREY}environment variables{R}"
     print()
     print(get_banner())
     print()
@@ -181,10 +163,10 @@ def print_startup_panel(port: int, room_name: str, hub: str, motd: str,
     print(_box_row("Address", f"{LBLUE}{public_addr}{R}", W))
     print(_box_row("Hub",     f"{GREY}{hub}{R}", W))
     print(_box_row("MOTD",    f"{DIM}{motd[:38]}{'…' if len(motd) > 38 else ''}{R}", W))
-    print(_box_row("History", f"{LGREY}last {MSG_HISTORY_SIZE} msgs (in-memory only){R}", W))
+    print(_box_row("History", f"{LGREY}last {MSG_HISTORY_SIZE} msgs (in-memory){R}", W))
     print(_box_row("Access",  access_str, W))
     print(_box_sep(W))
-    print(_box_row("Config",  cfg_src, W))
+    print(_box_row("Config",  env_src, W))
     print(_box_bot(W))
     print()
 
@@ -192,7 +174,7 @@ def print_hub_status(room_id: str = ""):
     W = 60
     print(_box_top(W))
     if room_id:
-        print(_box_row("Status",  f"{GREEN}● Connected to hub{R}", W))
+        print(_box_row("Status",  f"{GREEN}● Registered with hub{R}", W))
         print(_box_row("Room ID", f"{CYAN}{BOLD}{room_id}{R}", W))
     else:
         print(_box_center(f"{YELLOW}▲  Reconnecting to hub…{R}", W))
@@ -214,37 +196,33 @@ def log_event(kind: str, msg: str):
     print(f"{GREY}{ts}{R}  {icon}  {msg_col}{msg}{R}")
 
 # ─────────────────────────────────────────────
-#  Runtime state  (all ephemeral — lost on restart)
+#  Runtime state  (all ephemeral)
 # ─────────────────────────────────────────────
 
 start_time        = time.time()
 MAINTENANCE_MODE  = False
 
-# ws → display name
+# ws → display name  (registered only after successful name handshake)
 connected_clients: dict = {}
 
-# Ephemeral in-memory message history (no persistence)
-# Each entry: {"type":"chat"|"event", "from":"<name>"|None, "text":"<str>", "ts":"HH:MM"}
+# Ephemeral in-memory history — no persistence, cleared on restart
 message_history: deque = deque(maxlen=MSG_HISTORY_SIZE)
 
 SESSION_KEY  = Fernet.generate_key()
 cipher_suite = Fernet(SESSION_KEY)
-log.info(f"Session key initialised  {GREY}({SESSION_KEY.decode()[:8]}…){R}")
+log.info(f"Session key ready  {GREY}({SESSION_KEY.decode()[:8]}…){R}")
 
 # ─────────────────────────────────────────────
 #  Protocol helpers
 # ─────────────────────────────────────────────
 
 def _make_event(event: str, text: str) -> str:
-    """Build a structured event packet (NOT encrypted — server-level events)."""
     return json.dumps({"type": "event", "event": event, "text": text})
 
-def _make_chat(sender: str, ciphertext_b64: str) -> str:
-    """Build a structured chat packet."""
-    return json.dumps({"type": "chat", "from": sender, "ciphertext": ciphertext_b64})
+def _make_chat(sender: str, ct_b64: str) -> str:
+    return json.dumps({"type": "chat", "from": sender, "ciphertext": ct_b64})
 
 def _encrypt(text: str) -> str:
-    """Encrypt text with the room session key and return base64."""
     return base64.b64encode(cipher_suite.encrypt(text.encode())).decode()
 
 def _ts() -> str:
@@ -255,7 +233,6 @@ def _ts() -> str:
 # ─────────────────────────────────────────────
 
 async def _broadcast_raw(payload: str, exclude=None):
-    """Send a raw JSON string to all connected clients."""
     for ws in list(connected_clients.keys()):
         if ws is exclude:
             continue
@@ -265,16 +242,13 @@ async def _broadcast_raw(payload: str, exclude=None):
             connected_clients.pop(ws, None)
 
 async def _broadcast_event(event: str, text: str, exclude=None):
-    """Broadcast a structured event to all clients and add to history."""
     message_history.append({"type": "event", "event": event, "text": text, "ts": _ts()})
     await _broadcast_raw(_make_event(event, text), exclude=exclude)
 
-async def _send_encrypted_chat(sender: str, plaintext: str, target=None):
-    """Encrypt a chat message and broadcast or send to single target."""
+async def _send_chat(sender: str, plaintext: str, target=None):
     ct  = _encrypt(plaintext)
     pkt = _make_chat(sender, ct)
-    message_history.append({"type": "chat", "from": sender,
-                             "ciphertext": ct, "ts": _ts()})
+    message_history.append({"type": "chat", "from": sender, "ciphertext": ct, "ts": _ts()})
     if target:
         await target.send(pkt)
     else:
@@ -286,10 +260,13 @@ async def _send_encrypted_chat(sender: str, plaintext: str, target=None):
 
 async def handle_chat_client(websocket):
     if MAINTENANCE_MODE:
-        await websocket.send(json.dumps({
-            "type": "error",
-            "message": "⚠️ Maintenance Mode is ON. Please try again later."
-        }))
+        try:
+            await websocket.send(json.dumps({
+                "type": "error",
+                "message": "⚠️ Maintenance Mode is ON. Please try again later."
+            }))
+        except Exception:
+            pass
         await websocket.close()
         return
 
@@ -298,7 +275,7 @@ async def handle_chat_client(websocket):
 
     try:
         # ── 1. RSA handshake ────────────────────────────────────────
-        raw_hs = await websocket.recv()
+        raw_hs = await asyncio.wait_for(websocket.recv(), timeout=30)
         hs     = json.loads(raw_hs)
         if hs.get("type") != "handshake":
             await websocket.close()
@@ -315,21 +292,19 @@ async def handle_chat_client(websocket):
             "key":  base64.b64encode(enc_key).decode(),
         }))
 
-        # ── 2. Send room_meta: locked, MOTD, room name, history ─────
-        # History is sent so reconnecting users see recent context.
-        # It is ephemeral — cleared when the room restarts.
-        history_snapshot = list(message_history)
+        # ── 2. room_meta  ────────────────────────────────────────────
+        # MOTD is sent ONLY here — not again as an event (prevents double display)
         await websocket.send(json.dumps({
             "type":      "room_meta",
             "locked":    bool(ROOM_PASSWORD),
             "motd":      ROOM_MOTD,
             "room_name": MY_ROOM_NAME,
-            "history":   history_snapshot,
+            "history":   list(message_history),
         }))
 
-        # ── 3. Password check (before name is revealed) ─────────────
+        # ── 3. Password check ────────────────────────────────────────
         if ROOM_PASSWORD:
-            raw_auth  = await websocket.recv()
+            raw_auth  = await asyncio.wait_for(websocket.recv(), timeout=60)
             auth_data = json.loads(raw_auth)
 
             if auth_data.get("type") != "auth":
@@ -349,7 +324,7 @@ async def handle_chat_client(websocket):
                 return
 
             if submitted != ROOM_PASSWORD:
-                await websocket.send(json.dumps({"type":"auth_fail","message":"❌ Wrong password. Access denied."}))
+                await websocket.send(json.dumps({"type":"auth_fail","message":"❌ Wrong password."}))
                 await websocket.close()
                 log_event("auth_fail", f"[{client_id}]  wrong password")
                 return
@@ -357,45 +332,34 @@ async def handle_chat_client(websocket):
             await websocket.send(json.dumps({"type": "auth_ok"}))
             log_event("auth_ok", f"[{client_id}]  authenticated")
 
-        # ── 4. Receive encrypted display name ────────────────────────
-        # Client sends {"type":"name","ciphertext":"<b64>"}
-        name_pkt = json.loads(await websocket.recv())
-        if name_pkt.get("type") != "name":
-            # Backwards compat: older clients send {"type":"chat","ciphertext":...} for name
-            if name_pkt.get("type") != "chat":
-                await websocket.close()
-                return
+        # ── 4. Receive display name ──────────────────────────────────
+        name_pkt = json.loads(await asyncio.wait_for(websocket.recv(), timeout=30))
+        # Accept both {"type":"name",...} and legacy {"type":"chat",...}
+        if name_pkt.get("type") not in ("name", "chat"):
+            await websocket.close()
+            return
         name = cipher_suite.decrypt(base64.b64decode(name_pkt["ciphertext"])).decode().strip()
         if not name or len(name) > 24:
             name = f"anon-{client_id}"
 
-        # Register only after name is confirmed
+        # Register client only after full handshake completes
         connected_clients[websocket] = name
         log_event("join", f"[{client_id}]  '{name}'  ({len(connected_clients)} in room)")
 
-        # ── 5. Welcome sequence ──────────────────────────────────────
-        # a) Send MOTD directly to this client as a structured event
-        await websocket.send(_make_event("motd", ROOM_MOTD))
-
-        # b) Welcome message from the hub to this client (first-join greeting)
-        welcome_lines = [
-            f"Welcome to {MY_ROOM_NAME}, {name}!",
-            f"There {'is' if len(connected_clients)==1 else 'are'} "
-            f"{len(connected_clients)} user{'s' if len(connected_clients)!=1 else ''} here.",
-            "This room is ephemeral — messages exist only while the room is active.",
-            "Type /help for available commands.",
-        ]
-        for line in welcome_lines:
-            await websocket.send(_make_event("system", line))
-
-        # c) Commands hint
+        # ── 5. Welcome events (system only — MOTD already sent via room_meta) ──
+        n = len(connected_clients)
         await websocket.send(_make_event("system",
-            "Commands: /help  /who  /time  /uptime  /motd  /nick <name>"))
+            f"Welcome to {MY_ROOM_NAME}, {name}!  "
+            f"({n} user{'s' if n != 1 else ''} here)"))
+        await websocket.send(_make_event("system",
+            "Messages are ephemeral — lost when the room goes offline."))
+        await websocket.send(_make_event("system",
+            "/help  /who  /time  /uptime  /motd  /nick <n>  /leave"))
 
-        # d) Broadcast join event to everyone else
-        await _broadcast_event("join", f"{name} has joined the room.", exclude=websocket)
+        # Broadcast join to everyone else
+        await _broadcast_event("join", f"{name} joined the room.", exclude=websocket)
 
-        # ── 6. Main message loop ─────────────────────────────────────
+        # ── 6. Message loop ──────────────────────────────────────────
         async for raw_msg in websocket:
             try:
                 data = json.loads(raw_msg)
@@ -408,78 +372,88 @@ async def handle_chat_client(websocket):
                 sender  = connected_clients.get(websocket, "anonymous")
 
                 if message.startswith("/"):
-                    cmd      = message.strip()
-                    cmd_low  = cmd.lower()
-                    response = None
+                    cmd_low = message.strip().lower()
 
                     if cmd_low == "/help":
-                        response = (
+                        await websocket.send(_make_event("system",
                             "Commands:\n"
                             "  /help       — this message\n"
                             "  /who        — list users in room\n"
                             "  /time       — server time\n"
                             "  /uptime     — room uptime\n"
                             "  /motd       — message of the day\n"
-                            "  /nick <n>   — change your nickname"
-                        )
-                        await websocket.send(_make_event("system", response))
+                            "  /nick <n>   — change your nickname\n"
+                            "  /leave      — leave the room"))
 
                     elif cmd_low == "/who":
                         users = list(connected_clients.values())
-                        response = f"In room ({len(users)}): {', '.join(users)}"
-                        await websocket.send(_make_event("system", response))
+                        await websocket.send(_make_event("system",
+                            f"In room ({len(users)}): {', '.join(users)}"))
 
                     elif cmd_low == "/time":
-                        response = f"Server time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                        await websocket.send(_make_event("system", response))
+                        await websocket.send(_make_event("system",
+                            f"Server time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"))
 
                     elif cmd_low == "/uptime":
                         up   = int(time.time() - start_time)
                         h, r = divmod(up, 3600); m, s = divmod(r, 60)
-                        response = f"Room uptime: {h}h {m}m {s}s"
-                        await websocket.send(_make_event("system", response))
+                        await websocket.send(_make_event("system",
+                            f"Room uptime: {h}h {m}m {s}s"))
 
                     elif cmd_low == "/motd":
+                        # /motd command sends it as event type "motd" for styled display
                         await websocket.send(_make_event("motd", ROOM_MOTD))
 
                     elif cmd_low.startswith("/nick "):
-                        new_name = cmd[6:].strip()
+                        new_name = message.strip()[6:].strip()
                         if new_name and 1 <= len(new_name) <= 24:
                             old_name = connected_clients[websocket]
                             connected_clients[websocket] = new_name
-                            await _broadcast_event(
-                                "rename",
-                                f"{old_name} is now known as {new_name}."
-                            )
+                            await _broadcast_event("rename",
+                                f"{old_name} is now known as {new_name}.")
                             log_event("cmd", f"[{client_id}]  /nick  {old_name} → {new_name}")
                         else:
                             await websocket.send(_make_event("system",
                                 "Nickname must be 1–24 characters."))
+
                     else:
                         await websocket.send(_make_event("system",
-                            f"Unknown command: {cmd_low}  (try /help)"))
+                            f"Unknown: {cmd_low.split()[0]}  (try /help)"))
 
                     log_event("cmd", f"[{client_id}]  {cmd_low.split()[0]}")
 
                 else:
                     log_event("chat", f"[{client_id}]  {LGREY}{sender}{R}  (encrypted)")
-                    await _send_encrypted_chat(sender, message)
+                    await _send_chat(sender, message)
 
             except Exception as e:
-                log_event("error", f"[{client_id}]  decode error: {e}")
+                log_event("error", f"[{client_id}]  decode: {e}")
 
+    except asyncio.TimeoutError:
+        log_event("error", f"[{client_id}]  handshake timeout")
+    except ConnectionClosed:
+        pass
     except Exception as e:
-        log_event("error", f"[{client_id}]  connection error: {e}")
+        log_event("error", f"[{client_id}]  {e}")
     finally:
-        # ── Guaranteed cleanup ───────────────────────────────────────
         name = connected_clients.pop(websocket, None)
         if name:
             log_event("leave", f"[{client_id}]  '{name}'  ({len(connected_clients)} remaining)")
-            # Fire-and-forget leave broadcast — don't let it block cleanup
             try:
-                await _broadcast_event("leave", f"{name} has left the room.")
+                await _broadcast_event("leave", f"{name} left the room.")
             except Exception:
                 pass
+
+# ─────────────────────────────────────────────
+#  Simple HTTP health check (for Render)
+#  Render's health check hits / over HTTP — websockets.serve is WS-only
+#  and returns 426, causing Render to think the service is unhealthy.
+#  This runs a tiny aiohttp-like responder on the same port is NOT possible,
+#  so we run it on PORT+1 and tell Render to check that.
+#  Actually: websockets 10+ handles HTTP upgrades fine; the "opening handshake
+#  failed" logs come from Render's TCP health probe or bots. They are harmless
+#  but spammy. We suppress them via log level above. No extra port needed.
+# ─────────────────────────────────────────────
 
 # ─────────────────────────────────────────────
 #  PoW solver
@@ -502,10 +476,10 @@ async def register_with_hub():
 
     while True:
         try:
-            log_event("hub", f"Connecting to hub  {GREY}{hub_ws_url}{R}")
+            log_event("hub", f"Connecting  {GREY}{hub_ws_url}{R}")
             async with connect(hub_ws_url) as ws:
                 my_address = (
-                    (RENDER_EXTERNAL_URL or "")
+                    RENDER_EXTERNAL_URL
                     .replace("https://","wss://").replace("http://","ws://")
                 ) or f"ws://localhost:{PORT}"
 
@@ -547,7 +521,7 @@ async def register_with_hub():
                         if data.get("type") == "challenge":
                             ch   = data["challenge_string"]
                             diff = int(data.get("difficulty", 4))
-                            log_event("hub", f"Solving PoW  {GREY}(difficulty {diff}){R}")
+                            log_event("hub", f"Solving PoW  {GREY}(diff={diff}){R}")
                             nonce = solve_challenge(ch, diff)
                             await ws.send(json.dumps({
                                 "type": "response",
@@ -559,41 +533,112 @@ async def register_with_hub():
                             room_id = data.get("id", "?")
                             global MAINTENANCE_MODE
                             MAINTENANCE_MODE = data.get("maintenance", False)
-                            log_event("hub", f"Registered  ·  Room ID: {CYAN}{BOLD}{room_id}{R}")
+                            log_event("hub", f"Registered  Room ID: {CYAN}{BOLD}{room_id}{R}")
                             print_hub_status(room_id)
-                            if MAINTENANCE_MODE:
-                                log_event("sys", f"Hub reports  {YELLOW}Maintenance Mode ON{R}")
 
                         elif data.get("type") == "maintenance_update":
                             MAINTENANCE_MODE = data.get("enabled", False)
                             flag = "ON" if MAINTENANCE_MODE else "OFF"
-                            log_event("sys", f"Maintenance Mode → {YELLOW if MAINTENANCE_MODE else GREEN}{flag}{R}")
-                            sys_text = (
-                                "⚠️ Maintenance Mode enabled. New connections are paused."
-                                if MAINTENANCE_MODE else
-                                "✅ Maintenance Mode disabled. Connections resumed."
-                            )
-                            await _broadcast_raw(_make_event("system", sys_text))
+                            log_event("sys", f"Maintenance → {YELLOW if MAINTENANCE_MODE else GREEN}{flag}{R}")
+                            txt = ("⚠️ Maintenance Mode enabled." if MAINTENANCE_MODE
+                                   else "✅ Maintenance Mode disabled.")
+                            await _broadcast_raw(_make_event("system", txt))
 
                         elif data.get("type") == "broadcast":
                             msg = data.get("message", "")
                             if msg:
-                                log_event("sys", f"Admin broadcast: {LGREY}{msg}{R}")
+                                log_event("sys", f"Broadcast: {LGREY}{msg}{R}")
                                 await _broadcast_raw(_make_event("system", f"📢 {msg}"))
                 finally:
                     update_task.cancel()
 
         except Exception as e:
-            log_event("error", f"Hub connection lost: {e}  {GREY}— retrying in 10s{R}")
+            log_event("error", f"Hub lost: {e}  {GREY}retrying in 10s{R}")
             await asyncio.sleep(10)
 
 # ─────────────────────────────────────────────
 #  Entry point
 # ─────────────────────────────────────────────
 
+# ─────────────────────────────────────────────
+#  HTTP companion server  (PORT+1)
+#  Serves only room.html and /node/status.
+#  All lore/puzzle pages live on orion-core.
+# ─────────────────────────────────────────────
+
+HTTP_PORT = PORT + 1
+_SRC = Path(__file__).parent / "src"
+
+def _http_response(status: str, ctype: str, body: bytes,
+                   extra_headers: dict = None) -> bytes:
+    hdrs = (
+        f"HTTP/1.1 {status}\r\n"
+        f"Content-Type: {ctype}\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "Connection: close\r\n"
+    )
+    if extra_headers:
+        for k, v in extra_headers.items():
+            hdrs += f"{k}: {v}\r\n"
+    return hdrs.encode() + b"\r\n" + body
+
+async def _http_handler(reader: asyncio.StreamReader,
+                        writer: asyncio.StreamWriter):
+    """Minimal HTTP handler — room status page and JSON API only."""
+    try:
+        raw   = await asyncio.wait_for(reader.read(4096), timeout=5)
+        req   = raw.decode(errors="replace")
+        line  = req.split("\r\n")[0] if "\r\n" in req else req.split("\n")[0]
+        parts = line.split()
+        path  = parts[1].split("?")[0] if len(parts) >= 2 else "/"
+
+        up = round(time.time() - start_time)
+
+        # ── /node/status — public JSON API ──────────────────────────
+        if path == "/node/status":
+            body = json.dumps({
+                "room_name": MY_ROOM_NAME,
+                "motd":      ROOM_MOTD,
+                "online":    len(connected_clients),
+                "locked":    bool(ROOM_PASSWORD),
+                "uptime":    up,
+                "node_id":   SESSION_KEY.decode()[:6],
+            }).encode()
+            writer.write(_http_response("200 OK", "application/json", body, {
+                "Access-Control-Allow-Origin": "*",
+                "X-Node-Ephemeral": "true",
+            }))
+
+        # ── / and /room — room status page ──────────────────────────
+        elif path in ("/", "/room"):
+            p = _SRC / "room.html"
+            if p.exists():
+                body = p.read_bytes()
+            else:
+                body = b"<h1>room.html not found in src/</h1>"
+            writer.write(_http_response("200 OK",
+                                        "text/html; charset=utf-8", body))
+
+        # ── everything else → redirect to / ─────────────────────────
+        else:
+            writer.write(
+                b"HTTP/1.1 302 Found\r\nLocation: /\r\n"
+                b"Connection: close\r\n\r\n")
+
+        await writer.drain()
+    except Exception:
+        pass
+    finally:
+        try:
+            writer.close()
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+
 async def main():
     public_addr = (
-        (RENDER_EXTERNAL_URL or "")
+        RENDER_EXTERNAL_URL
         .replace("https://","wss://").replace("http://","ws://")
     ) or f"ws://localhost:{PORT}"
 
@@ -602,9 +647,16 @@ async def main():
         motd=ROOM_MOTD, public_addr=public_addr, protected=bool(ROOM_PASSWORD),
     )
 
-    chat_server = serve(handle_chat_client, "0.0.0.0", PORT)
-    log_event("hub", f"Chat server listening on port {CYAN}{PORT}{R}")
-    async with chat_server:
+    # Suppress noisy "opening handshake failed" from health probes / bots
+    logging.getLogger("websockets.server").setLevel(logging.ERROR)
+
+    chat_server  = serve(handle_chat_client, "0.0.0.0", PORT)
+    http_server  = await asyncio.start_server(_http_handler, "0.0.0.0", HTTP_PORT)
+
+    log_event("hub", f"Chat server  on port {CYAN}{PORT}{R}")
+    log_event("hub", f"HTTP status  on port {CYAN}{HTTP_PORT}{R}  (room.html + /node/status)")
+
+    async with chat_server, http_server:
         asyncio.create_task(register_with_hub())
         await asyncio.Future()
 

@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Orion Network Node">
+    <meta name="robots" content="noindex">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📡</text></svg>">
+    <title>Orion // Node</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.1/anime.min.js"></script>
+    <style>
+        :root {
+            --bg:     #050505;
+            --card:   #0a0a0a;
+            --text:   #e0e0e0;
+            --dim:    #a0a0a0;
+            --cyan:   #00f3ff;
+            --purple: #bc13fe;
+            --green:  #0aff0a;
+            --red:    #ff0a0a;
+            --yellow: #f0c040;
+            --border: #333;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'JetBrains Mono', monospace;
+            line-height: 1.6;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            background-image:
+                linear-gradient(rgba(0,243,255,.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0,243,255,.03) 1px, transparent 1px);
+            background-size: 30px 30px;
+        }
+
+        body::after {
+            content: ""; position: fixed; inset: 0;
+            background: linear-gradient(to bottom,
+                rgba(255,255,255,0), rgba(255,255,255,0) 50%,
+                rgba(0,0,0,.08) 50%, rgba(0,0,0,.08));
+            background-size: 100% 4px;
+            pointer-events: none; z-index: 100;
+        }
+
+        .wrap {
+            max-width: 820px; margin: 0 auto;
+            padding: 40px 20px; flex: 1; width: 100%;
+        }
+
+        /* Header — logo only, no nav */
+        header {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 48px;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 18px;
+        }
+
+        .logo {
+            font-size: 1.3rem; font-weight: 700; letter-spacing: -1px;
+            color: var(--cyan); text-shadow: 0 0 10px rgba(0,243,255,.35);
+            user-select: none;
+        }
+
+        .logo sub {
+            font-size: .64rem; color: var(--purple);
+            letter-spacing: 2px; font-weight: 400; margin-left: 8px;
+        }
+
+        /* Uptime — dim, top-right, no puzzle mechanics */
+        .header-right {
+            font-size: .72rem; color: #252525;
+            letter-spacing: 1px;
+        }
+
+        /* Status bar */
+        .status-bar {
+            display: flex; align-items: center; gap: 12px;
+            background: var(--card); border: 1px solid var(--border);
+            border-left: 3px solid var(--green);
+            padding: 13px 20px; margin-bottom: 22px; font-size: .83rem;
+            transition: border-color .4s;
+        }
+
+        .status-bar.offline { border-left-color: var(--red); }
+
+        .pulse {
+            width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0;
+            background: var(--green); box-shadow: 0 0 7px var(--green);
+            animation: glow 2.2s ease-in-out infinite;
+            transition: background .4s, box-shadow .4s;
+        }
+
+        .pulse.offline {
+            background: var(--red); box-shadow: 0 0 7px var(--red);
+            animation: none;
+        }
+
+        @keyframes glow {
+            0%,100% { opacity:1 }
+            50%      { opacity:.45 }
+        }
+
+        .status-txt { color: #fff; font-weight: 700; }
+        .status-id  { margin-left: auto; font-size: .7rem; color: #2a2a2a; }
+
+        /* MOTD */
+        .motd {
+            background: rgba(240,192,64,.04);
+            border: 1px solid rgba(240,192,64,.18);
+            border-left: 3px solid var(--yellow);
+            padding: 13px 20px; margin-bottom: 22px;
+        }
+
+        .motd-label {
+            font-size: .67rem; color: var(--yellow);
+            text-transform: uppercase; letter-spacing: 2px; margin-bottom: 5px;
+        }
+
+        .motd-val { color: #e8d88a; font-size: .9rem; line-height: 1.7; }
+
+        /* Info grid */
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+            gap: 13px; margin-bottom: 22px;
+        }
+
+        .card {
+            background: var(--card); border: 1px solid var(--border);
+            padding: 18px 20px; position: relative; overflow: hidden;
+        }
+
+        .card::before {
+            content: ""; position: absolute; top: 0; left: 0;
+            width: 2px; height: 100%;
+            background: var(--cyan); opacity: .35;
+        }
+
+        .card.private::before { background: var(--yellow); }
+
+        .card-lbl {
+            font-size: .67rem; color: var(--dim);
+            text-transform: uppercase; letter-spacing: 1px; margin-bottom: 7px;
+        }
+
+        .card-val {
+            font-size: 1.95rem; font-weight: 700; color: #fff;
+        }
+
+        .card-val.cyan   { color: var(--cyan); }
+        .card-val.green  { color: var(--green); }
+        .card-val.yellow { color: var(--yellow); font-size: 1.05rem; padding-top: 7px; }
+        .card-val.small  { font-size: 1.05rem; padding-top: 8px; letter-spacing: -1px; }
+
+        /* Notices */
+        .notice {
+            border: 1px solid #141414; padding: 10px 18px;
+            font-size: .74rem; color: #2e2e2e; text-align: center;
+            margin-bottom: 20px; letter-spacing: .4px;
+        }
+
+        .hint {
+            background: var(--card); border: 1px solid var(--border);
+            padding: 16px 20px; margin-bottom: 20px;
+            font-size: .79rem; color: var(--dim); line-height: 1.85;
+        }
+
+        .hint .cmd { color: var(--cyan); font-weight: 700; }
+
+        /* Subtle flavour line — points curious users toward the hub */
+        .flavour {
+            font-size: .68rem; color: #1c1c1c;
+            text-align: center; margin-bottom: 24px;
+            letter-spacing: .5px; line-height: 1.8;
+        }
+
+        /* Footer */
+        footer {
+            background: #080808; border-top: 1px solid var(--border);
+            padding: 38px 0 16px; margin-top: 50px;
+        }
+
+        .footer-inner {
+            max-width: 820px; margin: 0 auto; padding: 0 20px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+            gap: 26px;
+        }
+
+        .fc h3 { color: var(--cyan); margin-bottom: 11px; font-size: .92rem; }
+        .fc p  { color: var(--dim); font-size: .79rem; line-height: 1.6; }
+
+        .fl { list-style: none; }
+        .fl li { margin-bottom: 7px; }
+        .fl a  {
+            color: var(--dim); text-decoration: none;
+            font-size: .79rem; transition: color .3s;
+        }
+        .fl a:hover { color: var(--purple); padding-left: 4px; }
+
+        .footer-bottom {
+            text-align: center; margin-top: 34px; padding-top: 13px;
+            border-top: 1px solid #111; color: #2c2c2c; font-size: .72rem;
+        }
+
+        .footer-bottom a { color: #383838; text-decoration: none; }
+
+        @media (max-width: 540px) {
+            .grid { grid-template-columns: 1fr 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div class="wrap">
+        <header>
+            <div class="logo">ORION<sub>NODE</sub></div>
+            <div class="header-right" id="headerUptime"></div>
+        </header>
+
+        <div class="status-bar" id="statusBar">
+            <span class="pulse" id="pulseDot"></span>
+            <span class="status-txt" id="statusTxt">Connecting…</span>
+            <span class="status-id" id="statusId"></span>
+        </div>
+
+        <div class="motd" id="motdBlock" style="display:none">
+            <div class="motd-label">✦ Message of the Day</div>
+            <div class="motd-val" id="motdVal"></div>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <div class="card-lbl">Room Name</div>
+                <div class="card-val cyan" id="roomName">—</div>
+            </div>
+            <div class="card">
+                <div class="card-lbl">Users Online</div>
+                <div class="card-val green" id="online">—</div>
+            </div>
+            <div class="card" id="accessCard">
+                <div class="card-lbl">Access</div>
+                <div class="card-val yellow" id="access">—</div>
+            </div>
+            <div class="card">
+                <div class="card-lbl">Node Uptime</div>
+                <div class="card-val small" id="uptime">—</div>
+            </div>
+        </div>
+
+        <div class="notice">
+            ⚠ This node stores no messages. No logs. No records. Everything evaporates.
+        </div>
+
+        <div class="hint">
+            Connect via <span class="cmd">orion-connect</span> and join through
+            the hub room list.<br>
+            Messages are <strong style="color:#e0e0e0">ephemeral</strong> —
+            they exist only while this node is active.
+        </div>
+
+        <!-- Subtle flavour text — dim enough to miss, meaningful enough to notice.
+             This is the only hint pointing toward the hub puzzle. -->
+        <div class="flavour" id="flavour">
+            this network has been online since before this page existed.
+        </div>
+    </div>
+
+    <footer>
+        <div class="footer-inner">
+            <div class="fc">
+                <h3>ORION NODE</h3>
+                <p>An ephemeral, decentralized chat node.
+                   Part of the Orion mesh. No data is stored here.</p>
+            </div>
+            <div class="fc">
+                <h3>DEVELOPERS</h3>
+                <ul class="fl">
+                    <li>
+                        <a href="http://sahooshuvranshu.me"
+                           target="_blank" rel="noopener noreferrer">Shuvranshu</a>
+                    </li>
+                    <li>
+                        <a href="https://github.com/Crystal-Studio-Labs/"
+                           target="_blank" rel="noopener noreferrer">Crystal Studio Labs</a>
+                    </li>
+                </ul>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            Developed by
+            <a href="http://sahooshuvranshu.me"
+               target="_blank" rel="noopener noreferrer">Shuvranshu</a>
+            &amp;
+            <a href="https://github.com/Crystal-Studio-Labs/"
+               target="_blank" rel="noopener noreferrer">Crystal Studio Labs</a>
+            &nbsp;·&nbsp; &copy; 2025 Project Orion
+        </div>
+    </footer>
+
+    <script>
+        // Security
+        document.addEventListener('contextmenu', e => e.preventDefault());
+        document.onkeydown = e => {
+            if (e.keyCode === 123) return false;
+            if (e.ctrlKey && e.shiftKey &&
+                ['I','C','J'].includes(String.fromCharCode(e.keyCode))) return false;
+            if (e.ctrlKey && e.keyCode === 'U'.charCodeAt(0)) return false;
+        };
+
+        let _base = null, _at = null, _tick;
+
+        async function load() {
+            try {
+                const r    = await fetch('/node/status');
+                const data = await r.json();
+
+                document.getElementById('statusTxt').textContent = 'Node Online';
+                document.getElementById('pulseDot').classList.remove('offline');
+                document.getElementById('statusBar').classList.remove('offline');
+                document.getElementById('statusId').textContent =
+                    'NODE-' + (data.node_id || '?').toUpperCase();
+
+                document.getElementById('roomName').textContent =
+                    data.room_name || '—';
+
+                const cnt = data.online ?? 0;
+                anime({
+                    targets: { v: 0 }, v: cnt, round: 1, duration: 700,
+                    easing: 'easeOutExpo',
+                    update: a => document.getElementById('online').textContent =
+                        Math.round(a.animations[0].currentValue)
+                });
+
+                if (data.motd) {
+                    document.getElementById('motdVal').textContent = data.motd;
+                    document.getElementById('motdBlock').style.display = 'block';
+                }
+
+                const locked = data.locked ?? false;
+                document.getElementById('access').textContent =
+                    locked ? '🔒 Private' : '🔓 Public';
+                if (locked)
+                    document.getElementById('accessCard').classList.add('private');
+
+                if (data.uptime != null) {
+                    _base = data.uptime;
+                    _at   = Date.now();
+                    clearInterval(_tick);
+                    _tick = setInterval(_tickFn, 1000);
+                    _tickFn();
+                }
+
+            } catch (e) {
+                document.getElementById('statusTxt').textContent = 'Node Unreachable';
+                document.getElementById('pulseDot').classList.add('offline');
+                document.getElementById('statusBar').classList.add('offline');
+                document.getElementById('roomName').textContent = 'OFFLINE';
+            }
+        }
+
+        function _tickFn() {
+            if (_base == null) return;
+            const s  = Math.floor(_base + (Date.now() - _at) / 1000);
+            const h  = String(Math.floor(s / 3600)).padStart(2, '0');
+            const m  = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+            const sc = String(s % 60).padStart(2, '0');
+            document.getElementById('uptime').textContent  = `${h}:${m}:${sc}`;
+            document.getElementById('headerUptime').textContent = s + 's';
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            load();
+            setInterval(load, 20000);
+            anime({
+                targets: '.card', translateY: [16, 0], opacity: [0, 1],
+                delay: anime.stagger(85), duration: 600, easing: 'easeOutExpo'
+            });
+        });
+    </script>
+</body>
+</html>

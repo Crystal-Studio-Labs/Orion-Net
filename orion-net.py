@@ -102,10 +102,10 @@ class OrionFormatter(logging.Formatter):
 
 _log_handler = logging.StreamHandler()
 _log_handler.setFormatter(OrionFormatter())
-logging.getLogger().handlers           = [_log_handler]
+logging.getLogger().handlers = [_log_handler]
 logging.getLogger().setLevel(logging.INFO)
 logging.getLogger("websockets").setLevel(logging.WARNING)
-logging.getLogger("websockets.server").setLevel(logging.WARNING)
+logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
 log = logging.getLogger("orion-net")
 
 # ─────────────────────────────────────────────
@@ -635,32 +635,33 @@ async def _http_handler(reader: asyncio.StreamReader,
             pass
 
 async def process_request(path, request_headers):
-    up = round(time.time() - start_time)
+    try:
+        up = round(time.time() - start_time)
 
-    # ── JSON status ─────────────────────────
-    if path == "/node/status":
-        body = json.dumps({
-            "room_name": MY_ROOM_NAME,
-            "motd": ROOM_MOTD,
-            "online": len(connected_clients),
-            "locked": bool(ROOM_PASSWORD),
-            "uptime": up,
-        }).encode()
+        if path == "/node/status":
+            body = json.dumps({
+                "room_name": MY_ROOM_NAME,
+                "motd": ROOM_MOTD,
+                "online": len(connected_clients),
+                "locked": bool(ROOM_PASSWORD),
+                "uptime": up,
+            }).encode()
 
-        return (200, [
-            ("Content-Type", "application/json"),
-            ("Access-Control-Allow-Origin", "*")
-        ], body)
+            return (200, [
+                ("Content-Type", "application/json"),
+                ("Access-Control-Allow-Origin", "*")
+            ], body)
 
-    # ── HTML page ───────────────────────────
-    if path in ("/", "/room"):
-        p = Path(__file__).parent / "src" / "room.html"
-        if p.exists():
-            return (200, [("Content-Type", "text/html")], p.read_bytes())
-        return (200, [("Content-Type", "text/html")], b"<h1>room.html missing</h1>")
+        if path in ("/", "/room"):
+            p = Path(__file__).parent / "src" / "room.html"
+            if p.exists():
+                return (200, [("Content-Type", "text/html")], p.read_bytes())
+            return (200, [("Content-Type", "text/html")], b"<h1>room.html missing</h1>")
 
-    # ── fallback ────────────────────────────
-    return (302, [("Location", "/")], b"")
+        return (404, [("Content-Type", "text/plain")], b"Not Found")
+
+    except Exception as e:
+        return (500, [("Content-Type", "text/plain")], str(e).encode())
 
 async def main():
     public_addr = (

@@ -12,16 +12,19 @@ services:
         value: wss://orion-core.onrender.com
 
       - key: MY_ROOM_NAME
-        value: Orion Room
+        value: Project Orion
 
       - key: PORT
         value: 8765
 
       - key: ROOM_MOTD
-        value: Welcome to Orion-Net!
+        value: Welcome To Orion Network.
 
       - key: ROOM_PASSWORD
-        value: ""
+        value: ""   # empty = public room
+
+      - key: MSG_HISTORY_SIZE
+        value: 50
 
       - key: RENDER_EXTERNAL_URL
-        sync: false   # Render auto-injects this at runtime
+        sync: false   # auto-provided by Render at runtime

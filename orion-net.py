@@ -566,7 +566,6 @@ async def register_with_hub():
 #  All lore/puzzle pages live on orion-core.
 # ─────────────────────────────────────────────
 
-HTTP_PORT = PORT + 1
 _SRC = Path(__file__).parent / "src"
 
 def _http_response(status: str, ctype: str, body: bytes,
@@ -650,13 +649,11 @@ async def main():
     # Suppress noisy "opening handshake failed" from health probes / bots
     logging.getLogger("websockets.server").setLevel(logging.ERROR)
 
-    chat_server  = serve(handle_chat_client, "0.0.0.0", PORT)
-    http_server  = await asyncio.start_server(_http_handler, "0.0.0.0", HTTP_PORT)
+    chat_server  = serve(handle_chat_client, "0.0.0.0", PORT, process_request=process_request)
 
-    log_event("hub", f"Chat server  on port {CYAN}{PORT}{R}")
-    log_event("hub", f"HTTP status  on port {CYAN}{HTTP_PORT}{R}  (room.html + /node/status)")
-
-    async with chat_server, http_server:
+    log_event("hub", f"Server running on port {CYAN}{PORT}{R} (WS + HTTP)")
+    
+    async with chat_server:
         asyncio.create_task(register_with_hub())
         await asyncio.Future()
 

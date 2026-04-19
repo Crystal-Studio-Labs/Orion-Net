@@ -4,7 +4,7 @@
 ![WebSockets](https://img.shields.io/badge/WebSockets-Enabled-green)
 ![Encryption](https://img.shields.io/badge/Encryption-RSA%20%2B%20Fernet-purple)
 ![Status](https://img.shields.io/badge/Status-Active-success)
-![License](https://img.shields.io/badge/License-MIT-yellow)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 ![Architecture](https://img.shields.io/badge/Architecture-Decentralized-orange)
 ![Deploy](https://img.shields.io/badge/Deploy-Render-46E3B7?logo=render&logoColor=black)
 

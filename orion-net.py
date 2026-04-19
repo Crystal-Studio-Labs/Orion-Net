@@ -42,10 +42,9 @@ import datetime
 from collections import deque
 from pathlib import Path
 from dotenv import load_dotenv
-from websockets import serve, connect
+from websockets import connect
 from websockets.exceptions import ConnectionClosed
-from websockets.http11 import Response as WsResponse
-from websockets.datastructures import Headers as WsHeaders
+from websockets.asyncio.server import serve as ws_serve
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -636,25 +635,85 @@ async def _http_handler(reader: asyncio.StreamReader,
         except Exception:
             pass
 
-async def process_request(connection, request):
-    """HTTP request hook for websockets v13+.
+# ─────────────────────────────────────────────
+#  Pure-asyncio TCP router  (no websockets internals touched)
+#  Listens on PORT, peeks at the first bytes:
+#    • plain HTTP GET  → serve room.html / JSON / health
+#    • anything else   → forward to WebSocket server on WS_PORT
+# ─────────────────────────────────────────────
 
-    Handles plain HTTP requests (health probes, /node/status, room page)
-    so Render's health checker and browsers get real HTTP responses instead
-    of 426 Upgrade Required, which caused the "opening handshake failed" spam.
+WS_PORT = PORT + 1   # internal WS-only port; never exposed to the internet
 
-    Returns a Response to short-circuit (no WS upgrade), or None to proceed
-    with the normal WebSocket handshake.
+
+def _http_resp(status: str, ctype: str, body: bytes,
+               extra: dict | None = None) -> bytes:
+    hdrs = (f"HTTP/1.1 {status}\r\n"
+            f"Content-Type: {ctype}\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Connection: close\r\n")
+    if extra:
+        for k, v in extra.items():
+            hdrs += f"{k}: {v}\r\n"
+    return hdrs.encode() + b"\r\n" + body
+
+
+async def _pipe(reader, writer):
+    """Blindly forward bytes between two streams until one closes."""
+    try:
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                break
+            writer.write(data)
+            await writer.drain()
+    except Exception:
+        pass
+    finally:
+        try:
+            writer.close()
+        except Exception:
+            pass
+
+
+async def _router(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    """
+    Peek at the first bytes of each incoming TCP connection.
+    Plain HTTP requests are handled directly here.
+    WebSocket upgrade requests are proxied to WS_PORT.
     """
     try:
-        path = request.path.split("?")[0]
-        up   = round(time.time() - start_time)
+        peek = await asyncio.wait_for(reader.read(4096), timeout=10)
+    except Exception:
+        try: writer.close()
+        except Exception: pass
+        return
 
-        def _resp(status: int, ctype: str, body: bytes, extra: dict = None):
-            hdrs = {"Content-Type": ctype, "Content-Length": str(len(body))}
-            if extra:
-                hdrs.update(extra)
-            return WsResponse(status, WsHeaders(hdrs.items()), body)
+    first_line = peek.split(b"\r\n")[0].decode(errors="replace")
+    is_http    = first_line.startswith(("GET ", "POST ", "HEAD ", "OPTIONS "))
+    is_ws      = b"Upgrade: websocket" in peek or b"upgrade: websocket" in peek
+
+    # ── WebSocket upgrade → proxy to internal WS server ──────────────
+    if is_ws:
+        try:
+            ws_reader, ws_writer = await asyncio.open_connection("127.0.0.1", WS_PORT)
+        except Exception:
+            try: writer.close()
+            except Exception: pass
+            return
+        ws_writer.write(peek)
+        await ws_writer.drain()
+        await asyncio.gather(
+            _pipe(reader, ws_writer),
+            _pipe(ws_reader, writer),
+            return_exceptions=True,
+        )
+        return
+
+    # ── Plain HTTP request ────────────────────────────────────────────
+    if is_http:
+        parts = first_line.split()
+        path  = parts[1].split("?")[0] if len(parts) >= 2 else "/"
+        up    = round(time.time() - start_time)
 
         if path == "/node/status":
             body = json.dumps({
@@ -665,22 +724,27 @@ async def process_request(connection, request):
                 "uptime":    up,
                 "node_id":   SESSION_KEY.decode()[:6],
             }).encode()
-            return _resp(200, "application/json", body,
-                         {"Access-Control-Allow-Origin": "*",
-                          "X-Node-Ephemeral": "true"})
+            writer.write(_http_resp("200 OK", "application/json", body,
+                                    {"Access-Control-Allow-Origin": "*"}))
 
-        if path in ("/", "/room"):
-            p = Path(__file__).parent / "src" / "room.html"
+        elif path in ("/", "/room"):
+            p    = Path(__file__).parent / "src" / "room.html"
             body = p.read_bytes() if p.exists() else b"<h1>room.html not found in src/</h1>"
-            return _resp(200, "text/html; charset=utf-8", body)
+            writer.write(_http_resp("200 OK", "text/html; charset=utf-8", body))
 
-        # All other non-/ paths: let the WS upgrade proceed normally (return None)
-        # so actual WebSocket clients aren't rejected.
-        return None
+        else:
+            writer.write(b"HTTP/1.1 302 Found\r\nLocation: /\r\nConnection: close\r\n\r\n")
 
-    except Exception as e:
-        log_event("error", f"process_request: {e}")
-        return None
+        try:
+            await writer.drain()
+        except Exception:
+            pass
+
+    try:
+        writer.close()
+        await writer.wait_closed()
+    except Exception:
+        pass
 
 async def main():
     public_addr = (
@@ -693,14 +757,19 @@ async def main():
         motd=ROOM_MOTD, public_addr=public_addr, protected=bool(ROOM_PASSWORD),
     )
 
-    # Suppress noisy "opening handshake failed" from health probes / bots
-    logging.getLogger("websockets.server").setLevel(logging.ERROR)
+    # Suppress noisy low-level websockets logs
+    logging.getLogger("websockets.server").setLevel(logging.CRITICAL)
+    logging.getLogger("websockets").setLevel(logging.CRITICAL)
 
-    chat_server  = serve(handle_chat_client, "0.0.0.0", PORT, process_request=process_request)
+    # Internal WS-only server (127.0.0.1:WS_PORT — never exposed directly)
+    ws_server = await ws_serve(handle_chat_client, "127.0.0.1", WS_PORT)
 
-    log_event("hub", f"Server running on port {CYAN}{PORT}{R} (WS + HTTP)")
-    
-    async with chat_server:
+    # Public TCP router on PORT — handles HTTP health probes AND proxies WS upgrades
+    router = await asyncio.start_server(_router, "0.0.0.0", PORT)
+
+    log_event("hub", f"Router on :{CYAN}{PORT}{R}  →  WS on 127.0.0.1:{CYAN}{WS_PORT}{R}")
+
+    async with ws_server, router:
         asyncio.create_task(register_with_hub())
         await asyncio.Future()
 

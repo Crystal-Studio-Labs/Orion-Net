@@ -634,6 +634,33 @@ async def _http_handler(reader: asyncio.StreamReader,
         except Exception:
             pass
 
+async def process_request(path, request_headers):
+    up = round(time.time() - start_time)
+
+    # ── JSON status ─────────────────────────
+    if path == "/node/status":
+        body = json.dumps({
+            "room_name": MY_ROOM_NAME,
+            "motd": ROOM_MOTD,
+            "online": len(connected_clients),
+            "locked": bool(ROOM_PASSWORD),
+            "uptime": up,
+        }).encode()
+
+        return (200, [
+            ("Content-Type", "application/json"),
+            ("Access-Control-Allow-Origin", "*")
+        ], body)
+
+    # ── HTML page ───────────────────────────
+    if path in ("/", "/room"):
+        p = Path(__file__).parent / "src" / "room.html"
+        if p.exists():
+            return (200, [("Content-Type", "text/html")], p.read_bytes())
+        return (200, [("Content-Type", "text/html")], b"<h1>room.html missing</h1>")
+
+    # ── fallback ────────────────────────────
+    return (302, [("Location", "/")], b"")
 
 async def main():
     public_addr = (

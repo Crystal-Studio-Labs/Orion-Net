@@ -44,6 +44,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from websockets import serve, connect
 from websockets.exceptions import ConnectionClosed
+from websockets.http11 import Response as WsResponse
+from websockets.datastructures import Headers as WsHeaders
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -634,34 +636,51 @@ async def _http_handler(reader: asyncio.StreamReader,
         except Exception:
             pass
 
-async def process_request(path, request_headers):
+async def process_request(connection, request):
+    """HTTP request hook for websockets v13+.
+
+    Handles plain HTTP requests (health probes, /node/status, room page)
+    so Render's health checker and browsers get real HTTP responses instead
+    of 426 Upgrade Required, which caused the "opening handshake failed" spam.
+
+    Returns a Response to short-circuit (no WS upgrade), or None to proceed
+    with the normal WebSocket handshake.
+    """
     try:
-        up = round(time.time() - start_time)
+        path = request.path.split("?")[0]
+        up   = round(time.time() - start_time)
+
+        def _resp(status: int, ctype: str, body: bytes, extra: dict = None):
+            hdrs = {"Content-Type": ctype, "Content-Length": str(len(body))}
+            if extra:
+                hdrs.update(extra)
+            return WsResponse(status, WsHeaders(hdrs.items()), body)
 
         if path == "/node/status":
             body = json.dumps({
                 "room_name": MY_ROOM_NAME,
-                "motd": ROOM_MOTD,
-                "online": len(connected_clients),
-                "locked": bool(ROOM_PASSWORD),
-                "uptime": up,
+                "motd":      ROOM_MOTD,
+                "online":    len(connected_clients),
+                "locked":    bool(ROOM_PASSWORD),
+                "uptime":    up,
+                "node_id":   SESSION_KEY.decode()[:6],
             }).encode()
-
-            return (200, [
-                ("Content-Type", "application/json"),
-                ("Access-Control-Allow-Origin", "*")
-            ], body)
+            return _resp(200, "application/json", body,
+                         {"Access-Control-Allow-Origin": "*",
+                          "X-Node-Ephemeral": "true"})
 
         if path in ("/", "/room"):
             p = Path(__file__).parent / "src" / "room.html"
-            if p.exists():
-                return (200, [("Content-Type", "text/html")], p.read_bytes())
-            return (200, [("Content-Type", "text/html")], b"<h1>room.html missing</h1>")
+            body = p.read_bytes() if p.exists() else b"<h1>room.html not found in src/</h1>"
+            return _resp(200, "text/html; charset=utf-8", body)
 
-        return (404, [("Content-Type", "text/plain")], b"Not Found")
+        # All other non-/ paths: let the WS upgrade proceed normally (return None)
+        # so actual WebSocket clients aren't rejected.
+        return None
 
     except Exception as e:
-        return (500, [("Content-Type", "text/plain")], str(e).encode())
+        log_event("error", f"process_request: {e}")
+        return None
 
 async def main():
     public_addr = (

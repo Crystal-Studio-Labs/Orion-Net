@@ -42,8 +42,8 @@ import datetime
 from collections import deque
 from pathlib import Path
 from dotenv import load_dotenv
-from websockets import connect
 from websockets.exceptions import ConnectionClosed
+from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve as ws_serve
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import serialization, hashes
@@ -513,7 +513,11 @@ async def register_with_hub():
 
                 update_task = asyncio.create_task(send_updates())
                 try:
-                    async for raw in ws:
+                    while True:
+                        try:
+                            raw = await ws.recv()
+                        except Exception:
+                            break
                         try:
                             data = json.loads(raw)
                         except Exception:
